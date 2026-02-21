@@ -1,78 +1,187 @@
-
 import streamlit as st
 import requests
 import pandas as pd
 import math
+import time
+import yfinance as yf
 from datetime import datetime
 
 st.set_page_config(layout="wide")
-st.title("Simple Put-Call Parity Arbitrage Monitor")
+st.title("Multi-Arbitrage Monitor")
 
-st.markdown("Data Source: NSE Option Chain (Unofficial Public API)")
-st.markdown("Note: Dividend impact is NOT adjusted. Check upcoming dividends before execution.")
+st.markdown("Dividend adjustment NOT included. Verify before execution.")
 
-# ---- User Inputs ----
-symbol = st.selectbox("Select Stock", ["RELIANCE", "SBIN", "INFY"])
-risk_free_rate = st.number_input("Risk Free Rate (%)", value=6.5) / 100
-borrow_spread = st.number_input("Additional Borrowing Spread (%)", value=1.0) / 100
+# ================= USER CONTROLS ================= #
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    arbitrage_type = st.selectbox(
+        "Select Arbitrage Type",
+        ["Put-Call Parity", "Cash & Carry", "Interest Rate Parity"]
+    )
+
+with col2:
+    instrument = st.selectbox(
+        "Select Instrument",
+        ["RELIANCE", "SBIN", "INFY", "NIFTY", "BANKNIFTY"]
+    )
+
+with col3:
+    risk_free_rate = st.number_input("Risk Free Rate (%)", value=6.5) / 100
+
+with col4:
+    borrow_spread = st.number_input("Borrow Spread (%)", value=1.0) / 100
+
 expiry_days = st.number_input("Days to Expiry", value=30)
+refresh_seconds = st.slider("Auto Refresh (seconds)", 5, 60, 15)
 
 T = expiry_days / 365
 effective_rate = risk_free_rate + borrow_spread
 
-# ---- Fetch Option Chain ----
-def fetch_option_chain(symbol):
-    url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br"
-    }
-    session = requests.Session()
-    session.get("https://www.nseindia.com", headers=headers)
-    response = session.get(url, headers=headers)
-    data = response.json()
-    return data
+data_source_used = "Unknown"
 
-try:
-    data = fetch_option_chain(symbol)
-    records = data["records"]["data"]
-    spot_price = data["records"]["underlyingValue"]
+# ================= DATA FETCH FUNCTIONS ================= #
+
+def fetch_spot(symbol):
+    try:
+        mapping = {
+            "NIFTY": "^NSEI",
+            "BANKNIFTY": "^NSEBANK",
+            "RELIANCE": "RELIANCE.NS",
+            "SBIN": "SBIN.NS",
+            "INFY": "INFY.NS"
+        }
+        ticker = yf.Ticker(mapping[symbol])
+        return ticker.history(period="1d")["Close"].iloc[-1]
+    except:
+        return None
+
+def fetch_nse_option_chain(symbol):
+    try:
+        if symbol in ["NIFTY", "BANKNIFTY"]:
+            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        else:
+            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com")
+        response = session.get(url, timeout=10)
+
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
+# ================= PUT CALL PARITY ================= #
+
+if arbitrage_type == "Put-Call Parity":
+
+    nse_data = fetch_nse_option_chain(instrument)
+
+    if nse_data:
+        data_source_used = "NSE Option Chain"
+        records = nse_data["records"]["data"]
+        spot_price = nse_data["records"]["underlyingValue"]
+    else:
+        data_source_used = "Yahoo Finance Spot Only"
+        records = []
+        spot_price = fetch_spot(instrument)
 
     results = []
 
-    for item in records:
-        if "CE" in item and "PE" in item:
-            strike = item["strikePrice"]
-            call_price = item["CE"]["lastPrice"]
-            put_price = item["PE"]["lastPrice"]
+    if spot_price:
+        for item in records:
+            if "CE" in item and "PE" in item:
+                strike = item["strikePrice"]
+                call_price = item["CE"].get("lastPrice", 0)
+                put_price = item["PE"].get("lastPrice", 0)
 
-            lhs = call_price - put_price
-            rhs = spot_price - strike * math.exp(-effective_rate * T)
+                lhs = call_price - put_price
+                rhs = spot_price - strike * math.exp(-effective_rate * T)
+                diff = lhs - rhs
 
-            arbitrage = lhs - rhs
+                direction = (
+                    "Sell Call | Buy Put | Buy Spot"
+                    if diff > 0
+                    else "Buy Call | Sell Put | Short Spot"
+                )
 
-            results.append({
-                "Strike": strike,
-                "Call Price": call_price,
-                "Put Price": put_price,
-                "Parity Difference": round(arbitrage, 4)
-            })
+                results.append({
+                    "Strike": strike,
+                    "Call": call_price,
+                    "Put": put_price,
+                    "Parity Diff": round(diff, 4),
+                    "Action": direction
+                })
 
-    df = pd.DataFrame(results)
-    df["Abs Profit"] = df["Parity Difference"].abs()
-    df = df.sort_values(by="Abs Profit", ascending=False)
+        if results:
+            df = pd.DataFrame(results)
+            df["Abs Dev"] = df["Parity Diff"].abs()
+            df = df.sort_values(by="Abs Dev", ascending=False)
 
-    st.subheader(f"Spot Price: {spot_price}")
-    st.dataframe(df.head(15), use_container_width=True)
+            st.subheader(f"Spot Price: {round(spot_price,2)}")
+            st.dataframe(df.head(20), use_container_width=True)
 
-    st.markdown(f"Last Refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ================= CASH & CARRY ================= #
 
-except Exception:
-    st.error("Error fetching data from NSE. Try again later.")
+elif arbitrage_type == "Cash & Carry":
 
-st.markdown("---")
-st.markdown("### Execution Logic (Simplified)")
-st.markdown("If (Call - Put) > (Spot - PV(Strike)) : Sell Call, Buy Put, Buy Spot")
-st.markdown("If (Call - Put) < (Spot - PV(Strike)) : Buy Call, Sell Put, Short Spot")
-st.markdown("PV(Strike) = Strike * e^(-(risk-free + borrowing spread) * T)")
+    spot_price = fetch_spot(instrument)
+    futures_price = spot_price * 1.01 if spot_price else None  # simple proxy
+
+    data_source_used = "Yahoo Finance (Spot) + Synthetic Futures"
+
+    if spot_price:
+        theoretical_future = spot_price * math.exp(effective_rate * T)
+        diff = futures_price - theoretical_future
+
+        st.write(f"Spot: {round(spot_price,2)}")
+        st.write(f"Futures (Proxy): {round(futures_price,2)}")
+        st.write(f"Theoretical Futures: {round(theoretical_future,2)}")
+        st.write(f"Deviation: {round(diff,4)}")
+
+        if diff > 0:
+            st.success("Cash & Carry: Buy Spot, Sell Futures")
+        else:
+            st.success("Reverse Cash & Carry: Sell Spot, Buy Futures")
+
+# ================= INTEREST RATE PARITY ================= #
+
+elif arbitrage_type == "Interest Rate Parity":
+
+    currency_pair = st.selectbox(
+        "Select Currency Pair",
+        ["USDINR", "EURINR", "GBPUSD"]
+    )
+
+    spot_rate = 83.0
+    domestic_rate = risk_free_rate
+    foreign_rate = 0.05
+
+    forward_market = spot_rate * 1.01  # simple proxy
+    forward_theoretical = spot_rate * math.exp((domestic_rate - foreign_rate) * T)
+
+    diff = forward_market - forward_theoretical
+    data_source_used = "Model-Based (Proxy Rates)"
+
+    st.write(f"Spot Rate: {spot_rate}")
+    st.write(f"Market Forward: {round(forward_market,4)}")
+    st.write(f"Theoretical Forward: {round(forward_theoretical,4)}")
+    st.write(f"Deviation: {round(diff,4)}")
+
+    if diff > 0:
+        st.success("Borrow Foreign, Invest Domestic, Sell Forward")
+    else:
+        st.success("Borrow Domestic, Invest Foreign, Buy Forward")
+
+# ================= FOOTER ================= #
+
+st.markdown(f"### Data Source Used: **{data_source_used}**")
+st.success(f"Last Refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+time.sleep(refresh_seconds)
+st.experimental_rerun()
