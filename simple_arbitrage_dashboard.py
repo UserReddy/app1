@@ -9,39 +9,27 @@ from datetime import datetime
 st.set_page_config(layout="wide")
 st.title("Multi-Arbitrage Monitor")
 
-st.markdown("Dividend adjustment NOT included. Verify before execution.")
+# ================= GLOBAL SETTINGS ================= #
 
-# ================= USER CONTROLS ================= #
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    arbitrage_type = st.selectbox(
-        "Select Arbitrage Type",
-        ["Put-Call Parity", "Cash & Carry", "Interest Rate Parity"]
-    )
-
-with col2:
-    instrument = st.selectbox(
-        "Select Instrument",
-        ["RELIANCE", "SBIN", "INFY", "NIFTY", "BANKNIFTY"]
-    )
-
-with col3:
-    risk_free_rate = st.number_input("Risk Free Rate (%)", value=6.5) / 100
-
-with col4:
-    borrow_spread = st.number_input("Borrow Spread (%)", value=1.0) / 100
-
-expiry_days = st.number_input("Days to Expiry", value=30)
 refresh_seconds = st.slider("Auto Refresh (seconds)", 5, 60, 15)
+
+# ================= ARBITRAGE TYPE ================= #
+
+arbitrage_type = st.selectbox(
+    "Select Arbitrage Type",
+    ["Put-Call Parity", "Cash & Carry", "Interest Rate Parity"]
+)
+
+risk_free_rate = st.number_input("Risk Free Rate (%)", value=6.5) / 100
+borrow_spread = st.number_input("Borrow Spread (%)", value=1.0) / 100
+expiry_days = st.number_input("Days to Expiry", value=30)
 
 T = expiry_days / 365
 effective_rate = risk_free_rate + borrow_spread
 
 data_source_used = "Unknown"
 
-# ================= DATA FETCH FUNCTIONS ================= #
+# ================= COMMON SPOT FETCH ================= #
 
 def fetch_spot(symbol):
     try:
@@ -57,28 +45,33 @@ def fetch_spot(symbol):
     except:
         return None
 
-def fetch_nse_option_chain(symbol):
-    try:
-        if symbol in ["NIFTY", "BANKNIFTY"]:
-            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        else:
-            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-
-        headers = {"User-Agent": "Mozilla/5.0"}
-        session = requests.Session()
-        session.headers.update(headers)
-        session.get("https://www.nseindia.com")
-        response = session.get(url, timeout=10)
-
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except:
-        return None
-
 # ================= PUT CALL PARITY ================= #
 
 if arbitrage_type == "Put-Call Parity":
+
+    instrument = st.selectbox(
+        "Select Stock / Index",
+        ["RELIANCE", "SBIN", "INFY", "NIFTY", "BANKNIFTY"]
+    )
+
+    def fetch_nse_option_chain(symbol):
+        try:
+            if symbol in ["NIFTY", "BANKNIFTY"]:
+                url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+            else:
+                url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+
+            headers = {"User-Agent": "Mozilla/5.0"}
+            session = requests.Session()
+            session.headers.update(headers)
+            session.get("https://www.nseindia.com")
+            response = session.get(url, timeout=10)
+
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except:
+            return None
 
     nse_data = fetch_nse_option_chain(instrument)
 
@@ -87,7 +80,7 @@ if arbitrage_type == "Put-Call Parity":
         records = nse_data["records"]["data"]
         spot_price = nse_data["records"]["underlyingValue"]
     else:
-        data_source_used = "Yahoo Finance Spot Only"
+        data_source_used = "Yahoo Finance Spot"
         records = []
         spot_price = fetch_spot(instrument)
 
@@ -130,12 +123,16 @@ if arbitrage_type == "Put-Call Parity":
 
 elif arbitrage_type == "Cash & Carry":
 
-    spot_price = fetch_spot(instrument)
-    futures_price = spot_price * 1.01 if spot_price else None  # simple proxy
+    instrument = st.selectbox(
+        "Select Stock / Index",
+        ["RELIANCE", "SBIN", "INFY", "NIFTY", "BANKNIFTY"]
+    )
 
-    data_source_used = "Yahoo Finance (Spot) + Synthetic Futures"
+    spot_price = fetch_spot(instrument)
+    data_source_used = "Yahoo Finance Spot (Futures Proxy)"
 
     if spot_price:
+        futures_price = spot_price * 1.01  # simple proxy
         theoretical_future = spot_price * math.exp(effective_rate * T)
         diff = futures_price - theoretical_future
 
@@ -145,9 +142,9 @@ elif arbitrage_type == "Cash & Carry":
         st.write(f"Deviation: {round(diff,4)}")
 
         if diff > 0:
-            st.success("Cash & Carry: Buy Spot, Sell Futures")
+            st.success("Buy Spot | Sell Futures")
         else:
-            st.success("Reverse Cash & Carry: Sell Spot, Buy Futures")
+            st.success("Sell Spot | Buy Futures")
 
 # ================= INTEREST RATE PARITY ================= #
 
@@ -158,15 +155,15 @@ elif arbitrage_type == "Interest Rate Parity":
         ["USDINR", "EURINR", "GBPUSD"]
     )
 
+    data_source_used = "Model-Based (Proxy Rates)"
+
     spot_rate = 83.0
     domestic_rate = risk_free_rate
     foreign_rate = 0.05
 
-    forward_market = spot_rate * 1.01  # simple proxy
+    forward_market = spot_rate * 1.01
     forward_theoretical = spot_rate * math.exp((domestic_rate - foreign_rate) * T)
-
     diff = forward_market - forward_theoretical
-    data_source_used = "Model-Based (Proxy Rates)"
 
     st.write(f"Spot Rate: {spot_rate}")
     st.write(f"Market Forward: {round(forward_market,4)}")
@@ -174,9 +171,9 @@ elif arbitrage_type == "Interest Rate Parity":
     st.write(f"Deviation: {round(diff,4)}")
 
     if diff > 0:
-        st.success("Borrow Foreign, Invest Domestic, Sell Forward")
+        st.success("Borrow Foreign | Invest Domestic | Sell Forward")
     else:
-        st.success("Borrow Domestic, Invest Foreign, Buy Forward")
+        st.success("Borrow Domestic | Invest Foreign | Buy Forward")
 
 # ================= FOOTER ================= #
 
@@ -184,4 +181,4 @@ st.markdown(f"### Data Source Used: **{data_source_used}**")
 st.success(f"Last Refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 time.sleep(refresh_seconds)
-st.experimental_rerun()
+st.rerun()
